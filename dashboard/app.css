@@ -1,4 +1,4 @@
-/* Token Radar radar-2 theme. Palette: deep green ink on a pale sage canvas,
+/* Token Radar radar-3 theme. Palette: deep green ink on a pale sage canvas,
    amber only for the watchlist badge and the disclaimer rule. Two radii,
    two type families, one spacing scale; everything else is a hairline. */
 :root {
@@ -99,6 +99,7 @@ tbody tr[data-selected="true"] { background: var(--accent-soft); }
 .detail .sub { margin-top: var(--s1); }
 .detail-section { margin-top: var(--s5); padding-top: var(--s4); border-top: 1px solid var(--border); }
 .detail-section h3 { margin-bottom: var(--s2); }
+.rationale { margin-top: var(--s3); padding: var(--s3) var(--s4); background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 0 var(--radius-control) var(--radius-control) 0; font-size: 14px; }
 .equation { display: grid; gap: var(--s2); font-family: var(--font-num); font-size: 13px; }
 .equation div { display: flex; justify-content: space-between; gap: var(--s3); }
 .equation span { color: var(--muted); }

@@ -1,7 +1,8 @@
-// Token Radar radar-2 dashboard. It reads window.RADAR (written beside
+// Token Radar radar-3 dashboard. It reads window.RADAR (written beside
 // dashboard/ by main.ts) and renders the ranked board, a filterable table, a
-// per-protocol detail drawer with the model's own inputs and the protocol's
-// farm plan. No network: every byte it shows is in data.js.
+// per-protocol detail drawer with the model's own inputs, a plain-language
+// reason for the row's value and its typical range, and the protocol's farm
+// plan. No network: every byte it shows is in data.js.
 (function () {
   'use strict';
 
@@ -31,13 +32,37 @@
     if (days >= 365) return (days / 365).toFixed(1) + 'y';
     return Math.max(0, Math.round(days)) + 'd';
   }
-  // The model in one function, radar-2: the page recomputes a row from the
+  // The model in one function, radar-3: the page recomputes a row from the
   // snapshot figures and checks the number board.json carries, so the page's
   // code and the board's data are visibly the same arithmetic. Each factor
   // is stored on the row, so the page multiplies the stored factors rather
   // than re-deriving the peer medians.
   function impliedOf(row) {
     return Math.max(1, Math.round(row.tvl_usd * row.category_multiple * row.size_factor * row.growth_multiplier * row.maturity_multiplier * row.new_penalty * row.chain_multiplier * row.wrap_penalty));
+  }
+  // The row's value in plain language: the factor that lifts it most and
+  // the factor that drags it most, each named, so a reader can see why the
+  // number is what it is without doing the arithmetic. The peer multiple is
+  // judged against the global median, the size factor against 1, and the
+  // rest are multipliers on the row.
+  function rationaleFor(row) {
+    var parts = [
+      ['the ' + (row.category || 'Other') + ' peer multiple of ' + row.category_multiple.toFixed(3) + 'x', Math.log(row.category_multiple / DATA.global_multiple)],
+      ['the size factor of ' + row.size_factor.toFixed(2), Math.log(row.size_factor)],
+      ['the ' + fmtPct(row.change_7d) + ' week', Math.log(row.growth_multiplier)],
+      ['age of ' + fmtAge(row.age_days), Math.log(row.maturity_multiplier * row.new_penalty)],
+      ['chains (' + (row.chains ? row.chains.length : 0) + ')', Math.log(row.chain_multiplier)],
+      ['the wrapped / staked discount', Math.log(row.wrap_penalty)]
+    ];
+    var lift = null, drag = null;
+    parts.forEach(function (p) {
+      if (p[1] > 0 && (lift === null || p[1] > lift[1])) lift = p;
+      if (p[1] < 0 && (drag === null || p[1] < drag[1])) drag = p;
+    });
+    var why = row.name + ' is worth ' + fmtUsd(row.implied_value_usd) + ' because ' + fmtUsd(row.tvl_usd) + ' of TVL is priced at the ' + (row.category || 'Other') + ' peer multiple of ' + row.category_multiple.toFixed(3) + 'x (' + row.category_peers + ' tokenized peer' + (row.category_peers === 1 ? '' : 's') + '), then scaled by the size factor ' + row.size_factor.toFixed(2) + '.';
+    if (lift) why += ' The biggest lift is ' + lift[0] + ' (+' + Math.round((Math.exp(lift[1]) - 1) * 100) + '%).';
+    if (drag) why += ' The biggest drag is ' + drag[0] + ' (' + Math.round((Math.exp(drag[1]) - 1) * 100) + '%).';
+    return why;
   }
 
   function el(tag, attrs) {
@@ -217,7 +242,8 @@
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Global peer multiple' }), el('b', { text: String(DATA.global_multiple) + 'x TVL' }))
+        el('div', { class: 'fact' }, el('span', { text: 'Global peer multiple' }), el('b', { text: String(DATA.global_multiple) + 'x TVL' })),
+        el('div', { class: 'fact' }, el('span', { text: 'Holdout typical miss' }), el('b', { text: String(DATA.backtest.full_typical_miss) + 'x' }))
       )
     );
   }
@@ -341,14 +367,19 @@
 
   function modelPanel() {
     var m = DATA.model;
+    var b = DATA.backtest;
     var peers = (DATA.peer_multiples || []).slice(0, 8);
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x peerMultiple(category) x (tvl_usd / $1B)^-0.10 x growth x maturity x new x chain x wrap )'
+        'implied = round( tvl_usd x peerMultiple(category) x (tvl_usd / ' + fmtUsd(DATA.size_reference_usd) + ')^' + m.size_exponent + ' x growth x maturity x new x chain x wrap )'
       ),
-      el('p', { class: 'sub', text: 'peerMultiple is the shrunk median mcap / TVL of tokenized protocols in the same category (global median ' + DATA.global_multiple + 'x when a category has few peers), clamped to 0.05x-0.45x. TVL is sublinear, so doubling size no longer doubles value. Growth is dampened (+' + Math.round(m.growth_weight_up * 100) + '% per +100% week, -' + Math.round(m.growth_weight_down * 100) + '% per -100% week, clamped ' + m.growth_floor + '% to +' + m.growth_cap + '%). Maturity runs ' + m.maturity_floor + ' to ' + (m.maturity_floor + m.maturity_range) + ' over ' + m.maturity_days + ' days since first listing; an unlisted age uses ' + m.unknown_age_days + ' days, and protocols under 90 days take a further 0.85x-0.92x discount. Chains add 2.5% each, capped at four extra chains. Wrapped, staked or bridged products take 0.55x, because they wrap a token that already trades.' }),
+      el('p', { class: 'sub', text: 'peerMultiple is the shrunk median mcap / TVL of tokenized protocols in the same category (global median ' + DATA.global_multiple + 'x when a category has few peers), clamped to 0.05x-0.45x. The size reference is the median TVL of the tokenized protocols themselves (' + fmtUsd(DATA.size_reference_usd) + '), so the multiple is what the market pays per dollar of TVL for a typical-size protocol, and the size factor scales it by how far this protocol is from typical. Growth is dampened (+' + Math.round(m.growth_weight_up * 100) + '% per +100% week, -' + Math.round(m.growth_weight_down * 100) + '% per -100% week, clamped ' + m.growth_floor + '% to +' + m.growth_cap + '%). Maturity runs ' + m.maturity_floor + ' to ' + (m.maturity_floor + m.maturity_range) + ' over ' + m.maturity_days + ' days since first listing; an unlisted age uses ' + m.unknown_age_days + ' days, and protocols under 90 days take a further 0.85x-0.92x discount. Chains add 2.5% each, capped at four extra chains. Wrapped, staked or bridged products take 0.55x, because they wrap a token that already trades.' }),
+      el('h3', { text: 'What the holdout says' }),
+      el('p', { class: 'sub', text: 'The model was tested before it was trusted, on the snapshot itself: a ' + b.folds + '-fold holdout over its ' + b.tokenized_protocols + ' tokenized protocols, with the peer multiples recomputed on each training fold so no test protocol\'s own ratio leaks into its prediction. Pricing a protocol\'s market cap from its TVL with the global median misses by ' + b.global_only_median_log_error.toFixed(2) + ' in log terms (about 5.3x typically); the category median cuts that to ' + b.category_median_log_error.toFixed(2) + '; the fitted size factor cuts it to ' + b.kernel_median_log_error.toFixed(2) + ' (about ' + b.kernel_typical_miss + 'x typically). The full formula, with the launch-timing factors the brief asks for, misses by ' + b.full_median_log_error.toFixed(2) + ' (about ' + b.full_typical_miss + 'x) and ranks protocols at ' + b.full_spearman + ' (Spearman). It finds ' + b.top_decile_hits + ' of the ' + b.top_decile_total + ' largest by market cap in its top decile, against about 1 by chance.' }),
+      el('p', { class: 'sub', text: 'The size exponent is fitted, not asserted. The market\'s slope of log(market cap) on log(TVL) is ' + b.slope_pooled + ' pooled (standard error ' + b.slope_pooled_se + ') and ' + b.slope_within_category + ' within category (standard error ' + b.slope_within_category_se + '), so the model\'s slope of ' + (1 + m.size_exponent).toFixed(2) + ' sits between the two estimates. The previous exponent of -0.10 against a $1B reference over-priced the biggest protocols by 6.5x on median and under-priced the smallest by 2x. The launch-timing factors cost a little market-cap accuracy (3.4x to 3.7x typical miss) because a token\'s current market cap is not a launch value; they stay because the brief asks for growth and age, and the watchlist rule itself excludes wrapped products.' }),
+      el('p', { class: 'sub', text: 'The market prices a dollar of TVL over a 1,600x range (mcap / TVL from 0.00025 to 400 in this snapshot), so no TVL-only model can be precise. Every row therefore carries a typical range: the middle half of holdout outcomes fell between ' + b.range_low + 'x and ' + b.range_high + 'x the central estimate, and ' + b.within_four_x + ' of ' + b.tokenized_protocols + ' actual market caps fell within 4x of the prediction. A range that wide is the finding, not a failure to hide: it is why the board ranks by a central estimate and shows the range beside it.' }),
       el('h3', { text: 'Peer multiples by category' }),
       el('table', { class: 'peers' },
         el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Tokenized peers' }), el('th', { scope: 'col', text: 'Multiple' }))),
@@ -395,9 +426,12 @@
         el('div', null, el('span', { text: 'New-protocol penalty' }), el('b', { class: 'num', text: String(row.new_penalty) })),
         el('div', null, el('span', { text: 'Chain multiplier (' + (row.chains ? row.chains.length : 0) + ' chains)' }), el('b', { class: 'num', text: row.chain_multiplier.toFixed(3) })),
         el('div', null, el('span', { text: 'Wrapped / staked penalty' }), el('b', { class: 'num', text: String(row.wrap_penalty) })),
-        el('div', { class: 'total' }, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
+        el('div', { class: 'total' }, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
+        el('div', null, el('span', { text: 'Typical range (middle half of holdout outcomes)' }), el('b', { class: 'num', text: fmtUsd(row.range_low_usd) + ' - ' + fmtUsd(row.range_high_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (agree ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and it does not predict that a token will launch.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (agree ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and it does not predict that a token will launch.' }),
+      el('p', { class: 'rationale', text: rationaleFor(row) }),
+      el('p', { class: 'sub', text: 'The typical range is wide on purpose: in the holdout, the middle half of comparable launches landed between ' + DATA.backtest.range_low + 'x and ' + DATA.backtest.range_high + 'x the central estimate. The rank is the central estimate; the range is how much the market has disagreed with estimates like it.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),

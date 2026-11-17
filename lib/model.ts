@@ -1,4 +1,4 @@
-// Token Radar model v2 ("radar-2"): one snapshot in, one ranked board out.
+// Token Radar model v3 ("radar-3"): one snapshot in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a
 // ceiling) plus the 220 largest pre-token protocols below the floor by TVL.
@@ -15,11 +15,20 @@
 //     A lending protocol is priced like lending protocols that already
 //     trade, a DEX like DEXs that already trade, and so on. A category with
 //     no tokenized peer at all falls back to the global median.
-//   sizeFactor  = (tvl_usd / 1e9) ^ -0.10   -- sublinear TVL: a $5M protocol
-//     gets 1.70, $1B gets 1.00, $2.75B gets 0.90. Size still dominates, but
-//     doubling TVL no longer doubles implied value: the biggest protocols
-//     are already the most visible, and the radar exists to find the early
-//     ones before the crowd does.
+//   sizeFactor  = (tvl_usd / sizeReference) ^ -0.35, where sizeReference is
+//     the median TVL of the tokenized protocols themselves ($32,575,274 in
+//     this snapshot). The multiple is what the market pays per dollar of
+//     TVL for a typical-size protocol in the category; the size factor
+//     scales it by how far this protocol's TVL is from typical. The
+//     exponent is fitted, not asserted: a 5-fold holdout on the snapshot's
+//     128 tokenized protocols (peer multiples recomputed per fold, so no
+//     test protocol's own ratio leaks in) puts the market's slope of
+//     log(market cap) on log(TVL) at 0.52 pooled (SE 0.095) and 0.65
+//     within category (SE 0.114), so the model's slope 1 + exponent
+//     should be 0.52-0.65 and the exponent -0.35 sits between the two
+//     estimates, inside the flat optimum (-0.30 to -0.40) of the holdout.
+//     The previous -0.10 against a $1B reference over-priced the biggest
+//     protocols by 6.5x on median and under-priced the smallest by 2x.
 //   growthMult  = 1 + 0.35 * g / 100 for g >= 0, 1 + 0.55 * g / 100 for g < 0,
 //     where g = clamp(change_7d, -50, 100). Momentum is dampened (a +100%
 //     week is worth +35%, not +50%), and shrinking TVL is penalised harder
@@ -46,6 +55,23 @@
 //
 //   implied = round(tvl * categoryMultiple * sizeFactor * growthMult
 //                     * maturityMult * newPenalty * chainMult * wrapPenalty)
+//
+// The holdout's honest verdict on the whole formula: the pricing kernel
+// (category multiple + size) predicts a tokenized protocol's market cap
+// with a typical miss of 3.4x (median |log error| 1.23) and a rank
+// correlation of 0.41, and finds 5 of the 12 largest by market cap in its
+// top decile against about 1 by chance. The full formula with the
+// launch-timing factors runs a typical miss of 3.7x and a rank correlation
+// of 0.38: those factors are judgement the brief asks for (growth and age
+// are the brief's own inputs, and the watchlist rule itself excludes
+// wrapped products), not fitted to market cap, and they cost a little
+// market-cap accuracy. The market prices a dollar of TVL over a range
+// 1,600x wide (mcap/TVL from 0.00025 to 400 in this snapshot), so no
+// TVL-only model can be precise: every row therefore carries a typical
+// range, implied x [0.38, 5.6], the band that held the middle half of
+// holdout outcomes. A range that wide is the finding, not a failure to
+// hide: it is why the board ranks by a central estimate and shows the
+// range beside it.
 //
 // After sorting, implied values are forced strictly decreasing (a tied row
 // is lowered by at least 0.1% of the row above it) so the board is a real
@@ -85,6 +111,7 @@ export interface ModelConstants {
   maturity_days: number;
   unknown_age_days: number;
   size_exponent: number;
+  /** Fallback size reference, used only when the snapshot carries no priced protocol; the live reference is the median tokenized TVL, computed in peerMultiples. */
   size_reference_usd: number;
   multiple_floor: number;
   multiple_cap: number;
@@ -105,7 +132,7 @@ export const MODEL: ModelConstants = {
   maturity_range: 0.33,
   maturity_days: 1460,
   unknown_age_days: 365,
-  size_exponent: -0.1,
+  size_exponent: -0.35,
   size_reference_usd: 1_000_000_000,
   multiple_floor: 0.05,
   multiple_cap: 0.45,
@@ -118,7 +145,59 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
+
+/**
+ * The holdout backtest the methodology panel reports, measured once on the
+ * snapshot's 128 tokenized protocols (5-fold, peer multiples recomputed per
+ * fold). See analysis/backtest.mjs, which reproduces every number here
+ * from the snapshot alone. `range_low` / `range_high` are the multipliers
+ * of the central estimate that held the middle half of holdout outcomes.
+ */
+export const BACKTEST = {
+  folds: 5,
+  tokenized_protocols: 128,
+  global_only_median_log_error: 1.67,
+  category_median_log_error: 1.62,
+  v2_median_log_error: 1.39,
+  kernel_median_log_error: 1.23,
+  full_median_log_error: 1.32,
+  kernel_typical_miss: 3.4,
+  full_typical_miss: 3.7,
+  kernel_spearman: 0.41,
+  full_spearman: 0.38,
+  top_decile_hits: 5,
+  top_decile_total: 12,
+  slope_pooled: 0.52,
+  slope_pooled_se: 0.095,
+  slope_within_category: 0.65,
+  slope_within_category_se: 0.114,
+  range_low: 0.38,
+  range_high: 5.6,
+  within_four_x: 65,
+}; /** The holdout backtest, as the dashboard reports it. */
+export interface BacktestResult {
+  folds: number;
+  tokenized_protocols: number;
+  global_only_median_log_error: number;
+  category_median_log_error: number;
+  v2_median_log_error: number;
+  kernel_median_log_error: number;
+  full_median_log_error: number;
+  kernel_typical_miss: number;
+  full_typical_miss: number;
+  kernel_spearman: number;
+  full_spearman: number;
+  top_decile_hits: number;
+  top_decile_total: number;
+  slope_pooled: number;
+  slope_pooled_se: number;
+  slope_within_category: number;
+  slope_within_category_se: number;
+  range_low: number;
+  range_high: number;
+  within_four_x: number;
+}
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 220;
@@ -149,6 +228,8 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  /** The typical range: the central estimate times the holdout's middle-half band. */
+  typical_range_usd: [number, number];
   model: {
     category_multiple: number;
     category_peers: number;
@@ -177,6 +258,9 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  /** The typical range, in whole dollars, from the holdout's middle-half band. */
+  range_low_usd: number;
+  range_high_usd: number;
   category_multiple: number;
   category_peers: number;
   size_factor: number;
@@ -207,6 +291,10 @@ export interface RadarData {
   model: ModelConstants;
   model_version: string;
   global_multiple: number;
+  /** Median TVL of the tokenized protocols, the size factor's reference point. */
+  size_reference_usd: number;
+  /** The holdout backtest the methodology panel reports. */
+  backtest: BacktestResult;
   peer_multiples: { category: string; peers: number; multiple: number }[];
   watchlist: string[];
   watchlist_size: number;
@@ -252,12 +340,19 @@ function median(sorted: number[]): number | null {
  * Category peer multiples: for every category, the shrunk median mcap/TVL of
  * its tokenized protocols, shrunk toward the global median with a prior of
  * `shrink_prior` peers, then clamped. Computed from the snapshot alone.
+ * Also returns the size factor's reference: the median TVL of the tokenized
+ * protocols, so the peer multiple is the multiple at a typical-size
+ * protocol and the size factor measures departure from typical size. When
+ * the snapshot carries no priced protocol, the reference falls back to the
+ * model's `size_reference_usd`.
  */
-export function peerMultiples(snapshot: Snapshot, model: ModelConstants): { global: number; byCategory: Map<string, { multiple: number; peers: number }> } {
+export function peerMultiples(snapshot: Snapshot, model: ModelConstants): { global: number; byCategory: Map<string, { multiple: number; peers: number }>; sizeReference: number } {
   const allRatios: number[] = [];
+  const peerTvls: number[] = [];
   const byCat = new Map<string, number[]>();
   for (const p of snapshot.protocols) {
     if (p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) continue;
+    peerTvls.push(p.tvl_usd);
     const ratio = p.mcap_usd / p.tvl_usd;
     if (!Number.isFinite(ratio) || ratio <= 0) continue;
     allRatios.push(ratio);
@@ -267,7 +362,9 @@ export function peerMultiples(snapshot: Snapshot, model: ModelConstants): { glob
     byCat.set(cat, list);
   }
   allRatios.sort((a, b) => a - b);
+  peerTvls.sort((a, b) => a - b);
   const global = median(allRatios) ?? 0.2;
+  const sizeReference = median(peerTvls) ?? model.size_reference_usd;
   const out = new Map<string, { multiple: number; peers: number }>();
   for (const [cat, ratios] of byCat) {
     ratios.sort((a, b) => a - b);
@@ -280,7 +377,7 @@ export function peerMultiples(snapshot: Snapshot, model: ModelConstants): { glob
     else if (ratios.length < 5) multiple = Math.min(multiple, global * 1.75);
     out.set(cat, { multiple, peers: ratios.length });
   }
-  return { global, byCategory: out };
+  return { global, byCategory: out, sizeReference };
 }
 
 /** Whether a protocol is a wrapped / staked / bridged product of a token that already trades. */
@@ -331,12 +428,17 @@ export interface ScoredProtocol {
   age: number | null;
 }
 
+/** The typical range around a central estimate, from the holdout's middle-half band. */
+export function typicalRange(implied: number): [number, number] {
+  return [Math.max(1, Math.round(implied * BACKTEST.range_low)), Math.round(implied * BACKTEST.range_high)];
+}
+
 /** The multipliers and the implied value one protocol gets under `model`. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
-  peers: { global: number; byCategory: Map<string, { multiple: number; peers: number }> },
+  peers: { global: number; byCategory: Map<string, { multiple: number; peers: number }>; sizeReference: number },
 ): ScoredProtocol {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
@@ -347,7 +449,7 @@ export function impliedValue(
   const newPenalty = age !== null && age < 30 ? model.new_penalty_30d : age !== null && age < 90 ? model.new_penalty_90d : 1;
   const chainMult = 1 + model.chain_bonus * Math.min(Math.max(protocol.chains.length - 1, 0), model.chain_bonus_max);
   const wrapPenalty = isWrappedAdjacent(protocol) ? model.wrap_penalty : 1;
-  const sizeFactor = Math.pow(protocol.tvl_usd / model.size_reference_usd, model.size_exponent);
+  const sizeFactor = Math.pow(protocol.tvl_usd / peers.sizeReference, model.size_exponent);
   const peer = peers.byCategory.get(protocol.category ?? 'Other');
   const categoryMultiple = peer?.multiple ?? Math.min(model.multiple_cap, Math.max(model.multiple_floor, peers.global));
   const categoryPeers = peer?.peers ?? 0;
@@ -398,6 +500,7 @@ export function buildScored(snapshot: Snapshot, model: ModelConstants = MODEL): 
     token_status: 'pre-token' as const,
     age_days: s.age,
     implied_value_usd: s.implied,
+    typical_range_usd: typicalRange(s.implied),
     model: {
       category_multiple: round4(s.categoryMultiple),
       category_peers: s.categoryPeers,
@@ -570,6 +673,8 @@ export function radarRow(s: ScoredProtocol, rank: number): RadarRow {
     listed_at: s.p.listed_at,
     age_days: s.age,
     implied_value_usd: s.implied,
+    range_low_usd: typicalRange(s.implied)[0],
+    range_high_usd: typicalRange(s.implied)[1],
     category_multiple: s.categoryMultiple,
     category_peers: s.categoryPeers,
     size_factor: s.sizeFactor,
@@ -597,6 +702,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     model,
     model_version: MODEL_VERSION,
     global_multiple: round4(peers.global),
+    size_reference_usd: peers.sizeReference,
+    backtest: BACKTEST,
     peer_multiples: peerList,
     watchlist: snapshot.watchlist,
     watchlist_size: snapshot.watchlist.length,
